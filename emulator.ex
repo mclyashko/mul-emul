@@ -1,45 +1,6 @@
 defmodule Emulator do
   defstruct memory: %{}, registers: %{a: 0, b: 0, c: 0, d: 0, e: 0, ifreg: 0}, ir: 0, pc: 0
 
-  def with_log(emulator) do
-    sorted_parsed_memory =
-      emulator.memory
-      |> Map.to_list()
-      |> Enum.sort()
-      |> Enum.map(fn {ind, command} ->
-        {ind,
-         "encoded: #{command}; parsed: #{inspect(try do
-           parse_instruction(command)
-         rescue
-           _ -> command
-         end)}"}
-      end)
-
-    sorted_registers =
-      emulator.registers
-      |> Map.to_list()
-      |> Enum.sort()
-
-    parsed_ir =
-      try do
-        parse_instruction(emulator.ir)
-      rescue
-        _ -> emulator.ir
-      end
-
-    IO.inspect(
-      %{
-        memory: sorted_parsed_memory,
-        registers: sorted_registers,
-        ir: "encoded: #{emulator.ir}; parsed: #{inspect(parsed_ir)}",
-        pc: emulator.pc
-      },
-      limit: :infinity
-    )
-
-    emulator
-  end
-
   def new(memory_size) do
     %Emulator{
       memory: Enum.into(0..(memory_size - 1), %{}, fn i -> {i, 0} end),
@@ -95,13 +56,139 @@ defmodule Emulator do
 
   def run(%Emulator{} = _emulator), do: :ok
 
+  defp with_log(emulator) do
+    sorted_parsed_memory =
+      emulator.memory
+      |> Map.to_list()
+      |> Enum.sort()
+      |> Enum.map(fn {ind, command} ->
+        {ind,
+         "encoded: #{command}; parsed: #{inspect(try do
+           parse_instruction(command)
+         rescue
+           _ -> command
+         end)}"}
+      end)
+
+    sorted_registers =
+      emulator.registers
+      |> Map.to_list()
+      |> Enum.sort()
+
+    parsed_ir =
+      try do
+        parse_instruction(emulator.ir)
+      rescue
+        _ -> emulator.ir
+      end
+
+    IO.inspect(
+      %{
+        memory: sorted_parsed_memory,
+        registers: sorted_registers,
+        ir: "encoded: #{emulator.ir}; parsed: #{inspect(parsed_ir)}",
+        pc: emulator.pc
+      },
+      limit: :infinity
+    )
+
+    emulator
+  end
+
   defp encode_program(program) do
     program
-    |> Enum.map(fn command -> command |> :erlang.term_to_binary() |> :binary.decode_unsigned() end)
+    |> Enum.map(&encode_command/1)
+  end
+
+  defp encode_command(command) do
+    case command do
+      {:if, addr1, addr2} ->
+        <<1::16-little, addr1::8-little, addr2::8-little>>
+
+      {:store_init, addr1, addr2} ->
+        <<2::16-little, addr1::8-little, addr2::8-little>>
+
+      {:store_from_reg, reg1, reg2} ->
+        <<3::16-little, encode_reg(reg1)::8-little, encode_reg(reg2)::8-little>>
+
+      {:load_init, reg1, addr1} ->
+        <<4::16-little, encode_reg(reg1)::8-little, addr1::8-little>>
+
+      {:load_from_reg, reg1, reg2} ->
+        <<5::16-little, encode_reg(reg1)::8-little, encode_reg(reg2)::8-little>>
+
+      {:add, reg1, reg2} ->
+        <<6::16-little, encode_reg(reg1)::8-little, encode_reg(reg2)::8-little>>
+
+      {:sub, reg1, reg2} ->
+        <<7::16-little, encode_reg(reg1)::8-little, encode_reg(reg2)::8-little>>
+
+      {:goto, addr1} ->
+        <<8::16-little, addr1::16-little>>
+
+      {:halt} ->
+        <<9::16-little, 1::16-little>>
+    end
+    |> :binary.decode_unsigned()
+  end
+
+  defp encode_reg(reg) do
+    case reg do
+      :a -> 1
+      :b -> 2
+      :c -> 3
+      :d -> 4
+      :e -> 5
+      :ifreg -> 6
+      :ir -> 7
+      :pc -> 8
+    end
   end
 
   defp parse_instruction(encoded_command) do
-    encoded_command |> :binary.encode_unsigned() |> :erlang.binary_to_term()
+    encoded_command
+    |> :binary.encode_unsigned()
+    |> case do
+      <<1::16-little, addr1::8-little, addr2::8-little>> ->
+        {:if, addr1, addr2}
+
+      <<2::16-little, addr1::8-little, addr2::8-little>> ->
+        {:store_init, addr1, addr2}
+
+      <<3::16-little, reg1_no::8-little, reg2_no::8-little>> ->
+        {:store_from_reg, parse_reg(reg1_no), parse_reg(reg2_no)}
+
+      <<4::16-little, reg1_no::8-little, addr1::8-little>> ->
+        {:load_init, parse_reg(reg1_no), addr1}
+
+      <<5::16-little, reg1_no::8-little, reg2_no::8-little>> ->
+        {:load_from_reg, parse_reg(reg1_no), parse_reg(reg2_no)}
+
+      <<6::16-little, reg1_no::8-little, reg2_no::8-little>> ->
+        {:add, parse_reg(reg1_no), parse_reg(reg2_no)}
+
+      <<7::16-little, reg1_no::8-little, reg2_no::8-little>> ->
+        {:sub, parse_reg(reg1_no), parse_reg(reg2_no)}
+
+      <<8::16-little, addr1::16-little>> ->
+        {:goto, addr1}
+
+      <<9::16-little, 1::16-little>> ->
+        {:halt}
+    end
+  end
+
+  defp parse_reg(reg_no) do
+    case reg_no do
+      1 -> :a
+      2 -> :b
+      3 -> :c
+      4 -> :d
+      5 -> :e
+      6 -> :ifreg
+      7 -> :ir
+      8 -> :pc
+    end
   end
 
   defp if(emulator, ir, addr1, addr2) do
@@ -160,66 +247,3 @@ defmodule Emulator do
     %Emulator{emulator | ir: ir, pc: -1}
   end
 end
-
-program = [
-  # mem[0] = 25
-  {:store_init, 0, 25},
-  # mem[1] = 8
-  {:store_init, 1, 8},
-  # mem[2] = 1
-  {:store_init, 2, 1},
-  # reg[:a] = 25
-  {:load_init, :a, 0},
-  # reg[:b] = 1
-  {:load_init, :b, 2},
-  # reg[:ifreg] = 8
-  {:load_init, :ifreg, 1},
-  # reg[:ifreg] != 0 ? goto 7 : goto 11
-  {:if, 7, 11},
-  # mem[reg[:a]] = reg[:ifreg]
-  {:store_from_reg, :a, :ifreg},
-  # reg[:a] += reg[:b]
-  {:add, :a, :b},
-  # reg[:ifreg] -= reg[:b]
-  {:sub, :ifreg, :b},
-  # goto if
-  {:goto, 6},
-  # mem[3] = 0
-  {:store_init, 3, 0},
-  # reg[:a] = 25
-  {:load_init, :a, 0},
-  # reg[:c] = 0
-  {:load_init, :c, 3},
-  # reg[:ifreg] = 8
-  {:load_init, :ifreg, 1},
-  # reg[:ifreg] != 0 ? goto 16 : goto 21
-  {:if, 16, 21},
-  # reg[:d] = mem[reg[:a]]
-  {:load_from_reg, :d, :a},
-  # reg[:c] += reg[:d]
-  {:add, :c, :d},
-  # reg[:c] += reg[:b]
-  {:add, :a, :b},
-  # reg[:ifreg] -= reg[:b]
-  {:sub, :ifreg, :b},
-  # goto if
-  {:goto, 15},
-  # mem[0] = 0
-  {:store_init, 0, 0},
-  # reg[:a] = 0
-  {:load_init, :a, 0},
-  # mem[reg[:a]] = reg[:c]
-  {:store_from_reg, :a, :c},
-  # end program
-  {:halt}
-]
-
-emulator =
-  Emulator.new(36)
-  |> Emulator.with_log()
-  |> Emulator.load_program(program)
-  |> Emulator.with_log()
-
-result = Emulator.run(emulator)
-
-IO.inspect(result)
